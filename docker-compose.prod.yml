@@ -1,0 +1,24 @@
+version: "3.9"
+
+services:
+  uri-gateway.api.prod:
+    image: uriteam/urisvc:urigatewayapiprod
+    container_name: uri-gateway.api.prod
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "80", "--workers", "4"]
+    env_file:
+      - .env.production
+    environment:
+      - ENV=Production
+      - FRONTEND_URL=https://developers.urisocial.com
+    restart: always
+    ports:
+      - "9006:80"
+    networks:
+      - urisocial-production-network
+
+networks:
+  urisocial-production-network:
+    external: true
