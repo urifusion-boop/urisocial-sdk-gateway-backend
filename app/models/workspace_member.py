@@ -1,7 +1,6 @@
-from beanie import Document
+from beanie import Document, PydanticObjectId
 from pydantic import Field
 from datetime import datetime
-from bson import ObjectId
 import enum
 
 
@@ -13,8 +12,8 @@ class MemberRole(str, enum.Enum):
 
 
 class WorkspaceMember(Document):
-    workspace_id: ObjectId = Field(index=True)
-    developer_id: ObjectId = Field(index=True)
+    workspace_id: PydanticObjectId = Field(index=True)
+    developer_id: PydanticObjectId = Field(index=True)
     role: MemberRole = MemberRole.MEMBER
 
     created_at: datetime = Field(default_factory=datetime.utcnow)

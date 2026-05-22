@@ -1,6 +1,6 @@
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from bson import ObjectId
+from beanie import PydanticObjectId
 from app.core.security import decode_token
 from app.models.developer import Developer
 
@@ -32,7 +32,7 @@ async def get_current_developer(
         )
 
     # Query MongoDB with Beanie
-    developer = await Developer.get(ObjectId(developer_id))
+    developer = await Developer.get(PydanticObjectId(developer_id))
     if not developer:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

@@ -1,8 +1,7 @@
-from beanie import Document
+from beanie import Document, PydanticObjectId
 from pydantic import Field
 from datetime import datetime
 from typing import Optional
-from bson import ObjectId
 
 
 class APIKey(Document):
@@ -10,8 +9,8 @@ class APIKey(Document):
     key_prefix: str  # First 12 chars for display (e.g., "urisocial_abc...")
     name: str  # User-friendly name
     description: Optional[str] = None
-    developer_id: ObjectId = Field(index=True)
-    workspace_id: Optional[ObjectId] = None
+    developer_id: PydanticObjectId = Field(index=True)
+    workspace_id: Optional[PydanticObjectId] = None
 
     is_active: bool = True
     last_used_at: Optional[datetime] = None

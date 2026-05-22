@@ -1,8 +1,7 @@
-from beanie import Document
+from beanie import Document, PydanticObjectId
 from pydantic import Field
 from datetime import datetime
 from typing import Optional
-from bson import ObjectId
 import enum
 
 
@@ -15,7 +14,7 @@ class SubscriptionTier(str, enum.Enum):
 class Workspace(Document):
     name: str
     slug: str = Field(unique=True, index=True)
-    owner_id: ObjectId = Field(index=True)
+    owner_id: PydanticObjectId = Field(index=True)
 
     subscription_tier: SubscriptionTier = SubscriptionTier.FREE
     is_active: bool = True

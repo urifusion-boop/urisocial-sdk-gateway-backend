@@ -1,12 +1,11 @@
-from beanie import Document
+from beanie import Document, PydanticObjectId
 from pydantic import Field
 from datetime import datetime
 from typing import Optional
-from bson import ObjectId
 
 
 class UsageLog(Document):
-    api_key_id: ObjectId = Field(index=True)
+    api_key_id: PydanticObjectId = Field(index=True)
     endpoint: str
     method: str
     status_code: int
