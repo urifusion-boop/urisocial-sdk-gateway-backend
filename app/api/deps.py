@@ -1,20 +1,36 @@
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, status, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from beanie import PydanticObjectId
 from app.core.security import decode_token
 from app.models.developer import Developer
+from typing import Optional
 
-security = HTTPBearer()
+security = HTTPBearer(auto_error=False)
 
 
 async def get_current_developer(
-    credentials: HTTPAuthorizationCredentials = Depends(security),
+    request: Request,
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
 ) -> Developer:
     """
     Dependency to get current authenticated developer.
-    Validates JWT token and returns Developer object.
+    Validates JWT token from cookies or Authorization header.
+    Priority: Cookie > Authorization header
     """
-    token = credentials.credentials
+    # Try to get token from cookie first (more secure)
+    token = request.cookies.get("access_token")
+
+    # Fallback to Authorization header for API clients
+    if not token and credentials:
+        token = credentials.credentials
+
+    if not token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Not authenticated",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
     payload = decode_token(token)
 
     if not payload or payload.get("type") != "access":

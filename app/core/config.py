@@ -25,6 +25,14 @@ class Settings(BaseSettings):
     # API Keys
     API_KEY_PREFIX: str = "urisocial_"
 
+    # Email/SMTP
+    SMTP_HOST: str = ""
+    SMTP_PORT: int = 465
+    SMTP_USERNAME: str = ""
+    SMTP_PASSWORD: str = ""
+    SMTP_FROM_EMAIL: str = ""
+    SMTP_FROM_NAME: str = "URI Social SDK"
+
     class Config:
         env_file = ".env"
 

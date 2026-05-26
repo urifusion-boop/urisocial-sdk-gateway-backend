@@ -7,6 +7,7 @@ from app.schemas.auth import (
 from app.models.developer import Developer
 from app.core.security import verify_password, get_password_hash, create_access_token, create_refresh_token
 from app.api.deps import get_current_developer
+from app.services.email_service import email_service
 from datetime import datetime, timedelta
 import random
 import string
@@ -61,9 +62,16 @@ async def signup(request: SignupRequest, response: Response):
 
     await new_developer.insert()
 
-    # TODO: Send verification email with code
-    # For now, just print it (in production, use email service)
-    print(f"📧 Verification code for {request.email}: {verification_code}")
+    # Send verification email
+    await email_service.send_email(
+        to_email=request.email,
+        subject="Verify Your Email - URI Social SDK",
+        template_name="email_verification",
+        template_vars={
+            "first_name": request.first_name,
+            "verification_code": verification_code,
+        }
+    )
 
     # Generate tokens
     access_token = create_access_token(data={"sub": str(new_developer.id)})
@@ -162,8 +170,16 @@ async def resend_verification(request: ResendVerificationRequest):
     developer.updated_at = datetime.utcnow()
     await developer.save()
 
-    # TODO: Send email
-    print(f"📧 New verification code for {request.email}: {verification_code}")
+    # Send verification email
+    await email_service.send_email(
+        to_email=request.email,
+        subject="Verify Your Email - URI Social SDK",
+        template_name="email_verification",
+        template_vars={
+            "first_name": developer.first_name,
+            "verification_code": verification_code,
+        }
+    )
 
     return {"message": "Verification code sent"}
 
@@ -238,8 +254,16 @@ async def forgot_password(request: ForgotPasswordRequest):
     developer.updated_at = datetime.utcnow()
     await developer.save()
 
-    # TODO: Send email
-    print(f"📧 Password reset code for {request.email}: {reset_code}")
+    # Send password reset email
+    await email_service.send_email(
+        to_email=request.email,
+        subject="Reset Your Password - URI Social SDK",
+        template_name="password_reset",
+        template_vars={
+            "first_name": developer.first_name,
+            "reset_code": reset_code,
+        }
+    )
 
     return {"message": "If the email exists, a reset code has been sent"}
 
