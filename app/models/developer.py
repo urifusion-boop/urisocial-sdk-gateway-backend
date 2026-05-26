@@ -13,6 +13,15 @@ class Developer(Document):
     company_name: Optional[str] = None
     is_active: bool = True
     is_verified: bool = False
+
+    # Email verification fields
+    verification_code: Optional[str] = None
+    verification_code_expires: Optional[datetime] = None
+
+    # Password reset fields
+    reset_code: Optional[str] = None
+    reset_code_expires: Optional[datetime] = None
+
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
 
