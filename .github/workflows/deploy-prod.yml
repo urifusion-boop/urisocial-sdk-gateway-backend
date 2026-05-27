@@ -98,8 +98,14 @@ jobs:
             # Pull latest image
             docker pull uriteam/urisvc:urigatewayapiprod
 
-            # Deploy container (will restart uri-gateway.api.prod)
-            docker compose -f docker-compose.prod.yml down
+            # Stop and remove existing container if it exists
+            if docker ps -a | grep -q uri-gateway.api.prod; then
+              echo "Stopping and removing existing container..."
+              docker stop uri-gateway.api.prod || true
+              docker rm uri-gateway.api.prod || true
+            fi
+
+            # Deploy container
             docker compose -f docker-compose.prod.yml up -d
 
             # Cleanup redundant images
