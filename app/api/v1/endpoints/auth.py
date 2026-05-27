@@ -1,4 +1,5 @@
-from fastapi import APIRouter, Depends, HTTPException, status, Response
+from fastapi import APIRouter, Depends, HTTPException, status, Response, Request
+from fastapi.responses import RedirectResponse
 from app.schemas.auth import (
     SignupRequest, LoginRequest, TokenResponse, DeveloperResponse,
     VerifyEmailRequest, ResendVerificationRequest,
@@ -8,9 +9,13 @@ from app.models.developer import Developer
 from app.core.security import verify_password, get_password_hash, create_access_token, create_refresh_token
 from app.api.deps import get_current_developer
 from app.services.email_service import email_service
+from app.core.config import settings
 from datetime import datetime, timedelta
+from authlib.integrations.starlette_client import OAuth
+from itsdangerous import URLSafeTimedSerializer
 import random
 import string
+import httpx
 
 router = APIRouter()
 
@@ -359,3 +364,128 @@ async def logout(response: Response):
     response.delete_cookie(key=COOKIE_ACCESS_TOKEN_NAME)
     response.delete_cookie(key=COOKIE_REFRESH_TOKEN_NAME)
     return {"message": "Successfully logged out"}
+
+
+# Google OAuth Setup
+oauth = OAuth()
+oauth.register(
+    name='google',
+    client_id=settings.GOOGLE_CLIENT_ID,
+    client_secret=settings.GOOGLE_CLIENT_SECRET,
+    server_metadata_url='https://accounts.google.com/.well-known/openid-configuration',
+    client_kwargs={'scope': 'openid email profile'},
+)
+
+# State serializer for OAuth security
+state_serializer = URLSafeTimedSerializer(settings.SECRET_KEY, salt="google-oauth")
+
+
+@router.get("/google")
+async def google_login(request: Request):
+    """
+    Initiate Google OAuth login flow.
+    Redirects user to Google's authorization page.
+    """
+    # Generate state token for CSRF protection
+    state = state_serializer.dumps({"action": "login"})
+
+    redirect_uri = settings.GOOGLE_REDIRECT_URI
+    return await oauth.google.authorize_redirect(request, redirect_uri, state=state)
+
+
+@router.get("/google/callback")
+async def google_callback(request: Request, response: Response):
+    """
+    Handle Google OAuth callback.
+    Creates or logs in user based on Google account info.
+    """
+    try:
+        # Verify state token
+        state = request.query_params.get('state')
+        if not state:
+            raise HTTPException(status_code=400, detail="Missing state parameter")
+
+        try:
+            state_data = state_serializer.loads(state, max_age=600)  # 10 minutes
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid or expired state")
+
+        # Exchange authorization code for token
+        token = await oauth.google.authorize_access_token(request)
+
+        # Get user info from Google
+        user_info = token.get('userinfo')
+        if not user_info:
+            # Fallback: fetch userinfo manually
+            async with httpx.AsyncClient() as client:
+                resp = await client.get(
+                    'https://www.googleapis.com/oauth2/v3/userinfo',
+                    headers={'Authorization': f'Bearer {token["access_token"]}'}
+                )
+                user_info = resp.json()
+
+        email = user_info.get('email')
+        if not email:
+            raise HTTPException(status_code=400, detail="Email not provided by Google")
+
+        # Check if user exists
+        developer = await Developer.find_one(Developer.email == email)
+
+        if not developer:
+            # Create new developer account
+            developer = Developer(
+                email=email,
+                hashed_password="",  # No password for OAuth users
+                first_name=user_info.get('given_name', ''),
+                last_name=user_info.get('family_name', ''),
+                is_verified=True,  # Google already verified the email
+                oauth_provider="google",
+                oauth_id=user_info.get('sub'),
+            )
+            await developer.insert()
+        else:
+            # Update OAuth info if not set
+            if not developer.oauth_provider:
+                developer.oauth_provider = "google"
+                developer.oauth_id = user_info.get('sub')
+                developer.is_verified = True
+                developer.updated_at = datetime.utcnow()
+                await developer.save()
+
+        # Generate tokens
+        access_token = create_access_token(data={"sub": str(developer.id)})
+        refresh_token = create_refresh_token(data={"sub": str(developer.id)})
+
+        # Create redirect response to frontend
+        frontend_url = settings.FRONTEND_URL
+        redirect_url = f"{frontend_url}/dashboard"
+
+        # Create response with redirect
+        redirect_response = RedirectResponse(url=redirect_url)
+
+        # Set HttpOnly cookies
+        redirect_response.set_cookie(
+            key=COOKIE_ACCESS_TOKEN_NAME,
+            value=access_token,
+            max_age=COOKIE_MAX_AGE,
+            httponly=COOKIE_HTTPONLY,
+            secure=COOKIE_SECURE,
+            samesite=COOKIE_SAMESITE,
+            domain=COOKIE_DOMAIN,
+        )
+        redirect_response.set_cookie(
+            key=COOKIE_REFRESH_TOKEN_NAME,
+            value=refresh_token,
+            max_age=COOKIE_MAX_AGE,
+            httponly=COOKIE_HTTPONLY,
+            secure=COOKIE_SECURE,
+            samesite=COOKIE_SAMESITE,
+            domain=COOKIE_DOMAIN,
+        )
+
+        return redirect_response
+
+    except Exception as e:
+        # Redirect to login with error
+        error_url = f"{settings.FRONTEND_URL}/login?error=oauth_failed"
+        return RedirectResponse(url=error_url)

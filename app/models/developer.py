@@ -7,12 +7,16 @@ from bson import ObjectId
 
 class Developer(Document):
     email: EmailStr = Field(unique=True, index=True)
-    hashed_password: str
+    hashed_password: str = ""  # Empty for OAuth users
     first_name: Optional[str] = None
     last_name: Optional[str] = None
     company_name: Optional[str] = None
     is_active: bool = True
     is_verified: bool = False
+
+    # OAuth fields
+    oauth_provider: Optional[str] = None  # 'google', 'github', etc.
+    oauth_id: Optional[str] = None  # OAuth provider's user ID
 
     # Email verification fields
     verification_code: Optional[str] = None
