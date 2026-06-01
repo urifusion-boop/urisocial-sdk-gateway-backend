@@ -25,6 +25,9 @@ class Settings(BaseSettings):
     # API Keys
     API_KEY_PREFIX: str = "urisocial_"
 
+    # Main Backend URL
+    MAIN_BACKEND_URL: str = "https://api.urisocial.com"
+
     # Email/SMTP
     SMTP_HOST: str = ""
     SMTP_PORT: int = 465
@@ -38,8 +41,23 @@ class Settings(BaseSettings):
     GOOGLE_CLIENT_SECRET: str = ""
     GOOGLE_REDIRECT_URI: str = ""
 
+    # Squad Payment Gateway
+    SQUAD_MODE: str = "sandbox"  # sandbox or live
+    SQUAD_SANDBOX_SECRET_KEY: str = ""
+    SQUAD_SANDBOX_PUBLIC_KEY: str = ""
+    SQUAD_LIVE_SECRET_KEY: str = ""
+    SQUAD_LIVE_PUBLIC_KEY: str = ""
+    SQUAD_WEBHOOK_SECRET: str = ""
+    SQUAD_WEBHOOK_URL: str = ""
+    SQUAD_CALLBACK_URL: str = "http://localhost:3000/dashboard/billing/callback"
+
     class Config:
         env_file = ".env"
 
 
 settings = Settings()
+
+
+def get_settings() -> Settings:
+    """Get settings instance"""
+    return settings

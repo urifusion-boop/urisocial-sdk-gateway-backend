@@ -43,6 +43,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Usage tracking middleware for billing
+from app.middleware.usage_tracking import UsageTrackingMiddleware
+app.add_middleware(UsageTrackingMiddleware)
+
 # Include API router
 app.include_router(api_router, prefix="/api/v1")
 

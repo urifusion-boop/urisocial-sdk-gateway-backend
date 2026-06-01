@@ -5,7 +5,9 @@ from app.models.developer import Developer
 from app.models.api_key import APIKey
 from app.models.workspace import Workspace
 from app.models.workspace_member import WorkspaceMember
-from app.models.usage_log import UsageLog
+from app.models.usage_log import UsageLog, RateLimitCounter
+from app.models.webhook import Webhook, WebhookDelivery
+from app.models.billing import Subscription, PaymentTransaction, UsageRecord, Invoice, UsageLog as BillingUsageLog
 
 
 class MongoDB:
@@ -17,7 +19,11 @@ mongodb = MongoDB()
 
 async def connect_to_mongodb():
     """Connect to MongoDB and initialize Beanie ODM."""
-    mongodb.client = AsyncIOMotorClient(settings.MONGODB_URL)
+    mongodb.client = AsyncIOMotorClient(
+        settings.MONGODB_URL,
+        tlsAllowInvalidCertificates=True,
+        serverSelectionTimeoutMS=5000,
+    )
 
     await init_beanie(
         database=mongodb.client[settings.DATABASE_NAME],
@@ -27,6 +33,14 @@ async def connect_to_mongodb():
             Workspace,
             WorkspaceMember,
             UsageLog,
+            RateLimitCounter,
+            Webhook,
+            WebhookDelivery,
+            Subscription,
+            PaymentTransaction,
+            UsageRecord,
+            Invoice,
+            BillingUsageLog,  # Add billing usage log
         ],
     )
     print(f"✅ Connected to MongoDB: {settings.DATABASE_NAME}")

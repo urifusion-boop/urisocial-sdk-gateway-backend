@@ -1,0 +1,35 @@
+version: '3.8'
+
+services:
+  mongodb:
+    image: mongo:7.0
+    container_name: uri-gateway-mongodb-dev
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodb_data:/data/db
+    environment:
+      - MONGO_INITDB_DATABASE=uri_gateway_dev
+
+  redis:
+    image: redis:7-alpine
+    container_name: uri-gateway-redis-dev
+    ports:
+      - "6379:6379"
+
+  backend:
+    build: .
+    container_name: uri-gateway-api-dev
+    ports:
+      - "8001:8000"
+    env_file:
+      - .env
+    depends_on:
+      - mongodb
+      - redis
+    volumes:
+      - ./app:/app/app
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+
+volumes:
+  mongodb_data:
