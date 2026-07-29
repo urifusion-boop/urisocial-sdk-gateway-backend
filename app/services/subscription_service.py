@@ -22,7 +22,16 @@ class SubscriptionService:
         workspace_id: Optional[str] = None
     ) -> Subscription:
         """
-        Create new subscription after successful payment
+        Create (or replace) the developer's subscription after successful
+        payment.
+
+        If the developer already has an active subscription (e.g. they paid
+        for a different tier through the same "buy a plan" flow rather than
+        the dedicated prorated-upgrade flow), that existing subscription is
+        superseded in place rather than left active alongside a second one —
+        get_subscription() looks up a single active subscription per user_id,
+        so two simultaneously-active documents would make which one "wins"
+        arbitrary.
 
         Args:
             user_id: User ID
@@ -33,7 +42,7 @@ class SubscriptionService:
             workspace_id: Optional workspace ID
 
         Returns:
-            Created subscription
+            The active subscription
         """
         # Get plan details
         tier_enum = PlanTier(plan_tier)
@@ -53,6 +62,27 @@ class SubscriptionService:
         else:
             base_price_ngn = plan.yearly_price_ngn if billing_interval == "yearly" else plan.monthly_price_ngn
             base_price_usd = None
+
+        existing = await self.get_subscription(user_id)
+        if existing:
+            existing.plan_tier = plan_tier
+            existing.billing_interval = billing_interval
+            existing.base_price_ngn = base_price_ngn
+            existing.base_price_usd = base_price_usd
+            existing.currency = currency
+            existing.status = "active"
+            existing.current_period_start = now
+            existing.current_period_end = period_end
+            existing.cancel_at_period_end = False
+            existing.canceled_at = None
+            existing.last_payment_ref = payment_ref
+            existing.last_quota_warning_period = None
+            existing.last_quota_exceeded_period = None
+            existing.updated_at = now
+            await existing.save()
+
+            print(f"✅ Subscription replaced: {user_id} - {plan_tier} ({billing_interval}) - {currency}")
+            return existing
 
         # Create subscription
         subscription = Subscription(
@@ -150,63 +180,6 @@ class SubscriptionService:
             "new_price": new_price,
             "remaining_days": remaining_days
         }
-
-    async def apply_upgrade(
-        self,
-        user_id: str,
-        new_tier: str,
-        new_interval: str,
-        payment_ref: str
-    ) -> Subscription:
-        """
-        Apply subscription upgrade after payment
-
-        Args:
-            user_id: User ID
-            new_tier: New plan tier
-            new_interval: New billing interval
-            payment_ref: Payment transaction reference
-
-        Returns:
-            Updated subscription
-        """
-        current_sub = await self.get_subscription(user_id)
-
-        if not current_sub:
-            raise ValueError("No active subscription found")
-
-        # Get new plan
-        new_plan = get_plan(PlanTier(new_tier))
-        currency = current_sub.currency
-
-        # Calculate new billing period, in the subscription's own currency
-        now = datetime.now(timezone.utc)
-        if currency == "USD":
-            base_price_usd = new_plan.yearly_price_usd if new_interval == "yearly" else new_plan.monthly_price_usd
-            base_price_ngn = None
-        else:
-            base_price_ngn = new_plan.yearly_price_ngn if new_interval == "yearly" else new_plan.monthly_price_ngn
-            base_price_usd = None
-
-        if new_interval == "yearly":
-            period_end = now + timedelta(days=365)
-        else:
-            period_end = now + timedelta(days=30)
-
-        # Update subscription
-        current_sub.plan_tier = new_tier
-        current_sub.billing_interval = new_interval
-        current_sub.base_price_ngn = base_price_ngn
-        current_sub.base_price_usd = base_price_usd
-        current_sub.current_period_start = now
-        current_sub.current_period_end = period_end
-        current_sub.last_payment_ref = payment_ref
-        current_sub.updated_at = now
-
-        await current_sub.save()
-
-        print(f"✅ Subscription upgraded: {user_id} - {new_tier}")
-        return current_sub
 
     async def downgrade_subscription(
         self,

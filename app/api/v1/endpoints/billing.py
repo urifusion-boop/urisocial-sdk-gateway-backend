@@ -49,11 +49,10 @@ class UpgradeSubscriptionRequest(BaseModel):
     new_interval: str = Field(default="monthly", description="New billing interval")
 
 
-class ApplyUpgradeRequest(BaseModel):
-    """Request to apply a previously-quoted subscription upgrade after payment"""
+class InitializeUpgradePaymentRequest(BaseModel):
+    """Request to pay the prorated cost of upgrading to a new tier/interval"""
     new_tier: str = Field(..., description="New plan tier")
     new_interval: str = Field(default="monthly", description="New billing interval")
-    transaction_ref: str = Field(..., description="Squad transaction reference for the prorated upgrade payment")
 
 
 # ==================== Pricing & Plans ====================
@@ -204,6 +203,9 @@ async def verify_payment(
             )
 
             if payment and payment.status == "completed":
+                existing_sub = await subscription_service.get_subscription(payment.user_id)
+                is_tier_change = bool(existing_sub) and existing_sub.plan_tier != payment.plan_tier
+
                 # Create or update subscription
                 subscription = await subscription_service.create_subscription(
                     user_id=payment.user_id,
@@ -224,6 +226,18 @@ async def verify_payment(
                         "currency": payment.currency,
                     }
                 )
+
+                if is_tier_change:
+                    await trigger_event(
+                        developer_id=developer.id,
+                        event=WebhookEvent.SUBSCRIPTION_UPDATED,
+                        payload={
+                            "previous_plan_tier": existing_sub.plan_tier,
+                            "plan_tier": subscription.plan_tier,
+                            "billing_interval": subscription.billing_interval,
+                            "currency": subscription.currency,
+                        }
+                    )
 
                 return {
                     "success": True,
@@ -278,6 +292,9 @@ async def squad_webhook(
                     developer_id = PydanticObjectId(payment.user_id)
 
                     if payment.status == "completed" and not payment.subscription_id:
+                        existing_sub = await subscription_service.get_subscription(payment.user_id)
+                        is_tier_change = bool(existing_sub) and existing_sub.plan_tier != payment.plan_tier
+
                         # Create subscription
                         subscription = await subscription_service.create_subscription(
                             user_id=payment.user_id,
@@ -302,6 +319,18 @@ async def squad_webhook(
                                 "currency": payment.currency,
                             }
                         )
+
+                        if is_tier_change:
+                            await trigger_event(
+                                developer_id=developer_id,
+                                event=WebhookEvent.SUBSCRIPTION_UPDATED,
+                                payload={
+                                    "previous_plan_tier": existing_sub.plan_tier,
+                                    "plan_tier": subscription.plan_tier,
+                                    "billing_interval": subscription.billing_interval,
+                                    "currency": subscription.currency,
+                                }
+                            )
                     elif payment.status == "failed":
                         await trigger_event(
                             developer_id=developer_id,
@@ -376,54 +405,49 @@ async def upgrade_subscription(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/subscription/upgrade/apply")
-async def apply_subscription_upgrade(
-    body: ApplyUpgradeRequest,
+@router.post("/subscription/upgrade/initialize-payment")
+async def initialize_upgrade_payment(
+    body: InitializeUpgradePaymentRequest,
     developer: Developer = Depends(get_current_developer)
 ):
     """
-    Apply a previously-quoted subscription upgrade after the prorated
-    payment has been completed via Squad.
+    Initialize a Squad payment for the prorated cost of upgrading to a new
+    tier/interval (see POST /subscription/upgrade for the quote alone,
+    without initiating payment).
 
-    This is the second step of the upgrade flow: POST /subscription/upgrade
-    only returns a quote, it never changes the subscription — this endpoint
-    verifies the quoted payment actually went through, then applies it.
+    The resulting Squad payment is tagged with the new tier/interval, so
+    once it's paid, the standard /verify-payment flow — the same flow every
+    subscription purchase already goes through, wired to the shared
+    /dashboard/billing/callback page — applies it correctly on its own; no
+    separate "apply the upgrade" step is needed.
     """
     try:
         user_id = str(developer.id)
+        user_email = developer.email
 
-        verified = await payment_service.verify_payment(body.transaction_ref)
-        if not verified:
-            raise HTTPException(status_code=402, detail="Upgrade payment not verified")
-
-        subscription = await subscription_service.apply_upgrade(
+        quote = await subscription_service.upgrade_subscription(
             user_id=user_id,
             new_tier=body.new_tier,
-            new_interval=body.new_interval,
-            payment_ref=body.transaction_ref
+            new_interval=body.new_interval
         )
 
-        await trigger_event(
-            developer_id=developer.id,
-            event=WebhookEvent.SUBSCRIPTION_UPDATED,
-            payload={
-                "plan_tier": subscription.plan_tier,
-                "billing_interval": subscription.billing_interval,
-                "currency": subscription.currency,
-            }
+        result = await payment_service.initialize_payment(
+            user_id=user_id,
+            plan_tier=body.new_tier,
+            billing_interval=body.new_interval,
+            amount=quote["prorated_amount"],
+            currency=quote["currency"],
+            user_email=user_email
         )
 
         return {
             "success": True,
             "data": {
-                "subscription_id": str(subscription.id),
-                "plan_tier": subscription.plan_tier,
-                "status": subscription.status
+                **result,
+                "quote": quote,
             }
         }
 
-    except HTTPException:
-        raise
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
