@@ -53,7 +53,8 @@ class PaymentService:
         user_id: str,
         plan_tier: str,
         billing_interval: str,
-        amount_ngn: float,
+        amount: float,
+        currency: str,
         user_email: str
     ) -> Dict:
         """
@@ -63,7 +64,8 @@ class PaymentService:
             user_id: User making payment
             plan_tier: Subscription tier (starter, professional, enterprise)
             billing_interval: monthly or yearly
-            amount_ngn: Payment amount in Nigerian Naira
+            amount: Payment amount in the specified currency
+            currency: Currency code (NGN or USD)
             user_email: User's email address
 
         Returns:
@@ -71,14 +73,15 @@ class PaymentService:
         """
         # Generate unique transaction reference
         timestamp = int(datetime.now(timezone.utc).timestamp())
-        transaction_ref = f"SDKGTW_{user_id[:8]}_{plan_tier.upper()}_{billing_interval.upper()}_{timestamp}"
+        transaction_ref = f"SDKGTW_{user_id[:8]}_{plan_tier.upper()}_{billing_interval.upper()}_{currency}_{timestamp}"
 
         # Create pending payment transaction
         payment = PaymentTransaction(
             user_id=user_id,
             transaction_ref=transaction_ref,
-            amount_ngn=amount_ngn,
-            currency="NGN",
+            amount_ngn=amount if currency == "NGN" else None,
+            amount_usd=amount if currency == "USD" else None,
+            currency=currency,
             status="pending",
             plan_tier=plan_tier,
             billing_interval=billing_interval,
@@ -88,7 +91,8 @@ class PaymentService:
 
         # Get current Squad credentials
         creds = self._get_squad_credentials()
-        print(f"💳 Initializing payment in {creds['mode'].upper()} mode: ₦{amount_ngn:,.2f}")
+        currency_symbol = "$" if currency == "USD" else "₦"
+        print(f"💳 Initializing payment in {creds['mode'].upper()} mode: {currency_symbol}{amount:,.2f} {currency}")
 
         try:
             async with httpx.AsyncClient() as client:
@@ -97,11 +101,12 @@ class PaymentService:
                     "Content-Type": "application/json"
                 }
 
-                # Squad API expects amount in Kobo (1 Naira = 100 Kobo)
+                # Squad API expects amount in the smallest currency unit
+                # (Kobo for NGN, cents for USD)
                 payload = {
                     "email": user_email,
-                    "amount": int(amount_ngn * 100),  # Convert NGN to Kobo
-                    "currency": "NGN",
+                    "amount": int(amount * 100),
+                    "currency": currency,
                     "initiate_type": "inline",  # Opens payment modal
                     "transaction_ref": transaction_ref,
                     "callback_url": self.callback_url
@@ -126,9 +131,9 @@ class PaymentService:
                     return {
                         "payment_url": checkout_url,
                         "transaction_ref": transaction_ref,
-                        "amount": amount_ngn,
+                        "amount": amount,
                         "email": user_email,
-                        "currency": "NGN",
+                        "currency": currency,
                         "public_key": creds["public_key"]
                     }
                 else:

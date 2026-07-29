@@ -33,23 +33,28 @@ class InvoiceService:
         # Generate invoice number
         invoice_number = await self._generate_invoice_number()
 
-        # Get usage for period
+        # Get usage for period (billed in the developer's own subscription
+        # currency — see usage_service.get_current_usage)
         usage = await usage_service.get_current_usage(user_id)
+        currency = usage["currency"]
 
         # Get subscription charge
         from app.services.subscription_service import subscription_service
         subscription = await subscription_service.get_subscription(user_id)
 
         if subscription:
-            subscription_charge = subscription.base_price_ngn
+            subscription_charge = subscription.base_price_usd if currency == "USD" else subscription.base_price_ngn
+            subscription_charge = subscription_charge or 0.0
         else:
             subscription_charge = 0.0
 
         # Calculate overage
-        overage_charge = usage["overage_cost_ngn"]
+        overage_charge = usage["overage_cost"]
 
         # Calculate total
         total = subscription_charge + overage_charge
+
+        currency_symbol = "$" if currency == "USD" else "₦"
 
         # Build line items
         line_items = []
@@ -58,8 +63,8 @@ class InvoiceService:
             line_items.append({
                 "description": f"{subscription.plan_tier.title()} Plan - {subscription.billing_interval.title()}",
                 "quantity": 1,
-                "unit_price_ngn": subscription_charge,
-                "total_ngn": subscription_charge
+                "unit_price": subscription_charge,
+                "total": subscription_charge
             })
 
         if overage_charge > 0:
@@ -67,8 +72,8 @@ class InvoiceService:
             line_items.append({
                 "description": f"Additional AI-Generation Credits ({overage_credits:,} credits)",
                 "quantity": overage_credits,
-                "unit_price_ngn": overage_charge / overage_credits if overage_credits > 0 else 0,
-                "total_ngn": overage_charge
+                "unit_price": overage_charge / overage_credits if overage_credits > 0 else 0,
+                "total": overage_charge
             })
 
         # Create invoice
@@ -83,7 +88,7 @@ class InvoiceService:
             discount_ngn=0.0,
             tax_ngn=0.0,
             total_ngn=total,
-            currency="NGN",
+            currency=currency,
             line_items=line_items,
             status="issued",
             issued_at=datetime.now(timezone.utc),
@@ -94,7 +99,7 @@ class InvoiceService:
 
         await invoice.insert()
 
-        print(f"✅ Invoice generated: {invoice_number} - ₦{total:,.2f}")
+        print(f"✅ Invoice generated: {invoice_number} - {currency_symbol}{total:,.2f} {currency}")
         return invoice
 
     async def _generate_invoice_number(self) -> str:
@@ -205,18 +210,21 @@ class InvoiceService:
         if not invoice:
             raise ValueError("Invoice not found")
 
+        symbol = "$" if invoice.currency == "USD" else "₦"
+
         return {
             "invoice_number": invoice.invoice_number,
             "invoice_date": invoice.issued_at.strftime("%B %d, %Y") if invoice.issued_at else "",
             "due_date": invoice.due_date.strftime("%B %d, %Y") if invoice.due_date else "",
             "period_start": invoice.period_start.strftime("%B %d, %Y"),
             "period_end": invoice.period_end.strftime("%B %d, %Y"),
+            "currency": invoice.currency,
             "line_items": invoice.line_items,
-            "subscription_charge": f"₦{invoice.subscription_charge_ngn:,.2f}",
-            "overage_charge": f"₦{invoice.overage_charge_ngn:,.2f}",
-            "discount": f"₦{invoice.discount_ngn:,.2f}",
-            "tax": f"₦{invoice.tax_ngn:,.2f}",
-            "total": f"₦{invoice.total_ngn:,.2f}",
+            "subscription_charge": f"{symbol}{invoice.subscription_charge_ngn:,.2f}",
+            "overage_charge": f"{symbol}{invoice.overage_charge_ngn:,.2f}",
+            "discount": f"{symbol}{invoice.discount_ngn:,.2f}",
+            "tax": f"{symbol}{invoice.tax_ngn:,.2f}",
+            "total": f"{symbol}{invoice.total_ngn:,.2f}",
             "status": invoice.status.upper(),
             "paid_at": invoice.paid_at.strftime("%B %d, %Y") if invoice.paid_at else None
         }

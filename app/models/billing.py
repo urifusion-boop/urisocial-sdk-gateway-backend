@@ -20,9 +20,10 @@ class Subscription(Document):
     plan_tier: str = Field(..., description="free, starter, professional, enterprise")
     billing_interval: str = Field(default="monthly", description="monthly or yearly")
 
-    # Pricing in NGN
-    base_price_ngn: float = Field(..., description="Base subscription price in NGN")
-    currency: str = Field(default="NGN", description="Currency code")
+    # Pricing (multi-currency support)
+    base_price_ngn: Optional[float] = Field(None, description="Base subscription price in NGN")
+    base_price_usd: Optional[float] = Field(None, description="Base subscription price in USD")
+    currency: str = Field(default="NGN", description="Currency code (NGN or USD)")
 
     # Lifecycle status
     status: str = Field(default="active", description="active, past_due, canceled, expired, trialing")
@@ -34,6 +35,13 @@ class Subscription(Document):
     # Squad payment integration
     last_payment_ref: Optional[str] = Field(None, description="Latest Squad transaction reference")
     payment_method: Optional[str] = Field(None, description="card, bank_transfer, ussd")
+
+    # Quota webhook dedup — records the billing period (current_period_start,
+    # ISO date) a quota.warning/quota.exceeded webhook was last sent for, so
+    # the periodic quota-check job (see app/services/scheduler.py) fires each
+    # at most once per period instead of every time it runs.
+    last_quota_warning_period: Optional[str] = None
+    last_quota_exceeded_period: Optional[str] = None
 
     # Timestamps
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
@@ -59,8 +67,9 @@ class PaymentTransaction(Document):
 
     # Squad payment details
     transaction_ref: str = Field(..., description="Unique Squad transaction reference")
-    amount_ngn: float = Field(..., description="Payment amount in NGN")
-    currency: str = Field(default="NGN", description="Currency code")
+    amount_ngn: Optional[float] = Field(None, description="Payment amount in NGN")
+    amount_usd: Optional[float] = Field(None, description="Payment amount in USD")
+    currency: str = Field(default="NGN", description="Currency code (NGN or USD)")
     status: str = Field(default="pending", description="pending, completed, failed, refunded")
 
     # Squad response
@@ -105,13 +114,15 @@ class Invoice(Document):
     period_start: datetime = Field(..., description="Invoice period start")
     period_end: datetime = Field(..., description="Invoice period end")
 
-    # Line items
+    # Line items — amounts are in whatever `currency` below is (field names
+    # kept as "_ngn" for backward compatibility; the currency field is
+    # authoritative for how to interpret/display them).
     subscription_charge_ngn: float = Field(default=0.0, description="Base plan cost")
     overage_charge_ngn: float = Field(default=0.0, description="Extra usage charges")
     discount_ngn: float = Field(default=0.0, description="Discounts applied")
     tax_ngn: float = Field(default=0.0, description="Tax amount (if applicable)")
     total_ngn: float = Field(..., description="Total amount due")
-    currency: str = Field(default="NGN", description="Currency code")
+    currency: str = Field(default="NGN", description="Currency code (NGN or USD) — governs how the _ngn-suffixed amount fields above are interpreted")
 
     # Line item details
     line_items: List[Dict] = Field(default_factory=list, description="Detailed line items")

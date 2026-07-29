@@ -18,6 +18,7 @@ class SubscriptionService:
         plan_tier: str,
         billing_interval: str,
         payment_ref: str,
+        currency: str = "NGN",
         workspace_id: Optional[str] = None
     ) -> Subscription:
         """
@@ -28,6 +29,7 @@ class SubscriptionService:
             plan_tier: Plan tier (free, starter, professional, enterprise)
             billing_interval: monthly or yearly
             payment_ref: Squad payment transaction reference
+            currency: Currency code (NGN or USD)
             workspace_id: Optional workspace ID
 
         Returns:
@@ -44,11 +46,13 @@ class SubscriptionService:
         else:
             period_end = now + timedelta(days=30)
 
-        # Get pricing
-        if billing_interval == "yearly":
-            base_price = plan.yearly_price_ngn
+        # Get pricing based on currency
+        if currency == "USD":
+            base_price_usd = plan.yearly_price_usd if billing_interval == "yearly" else plan.monthly_price_usd
+            base_price_ngn = None
         else:
-            base_price = plan.monthly_price_ngn
+            base_price_ngn = plan.yearly_price_ngn if billing_interval == "yearly" else plan.monthly_price_ngn
+            base_price_usd = None
 
         # Create subscription
         subscription = Subscription(
@@ -56,8 +60,9 @@ class SubscriptionService:
             workspace_id=workspace_id,
             plan_tier=plan_tier,
             billing_interval=billing_interval,
-            base_price_ngn=base_price,
-            currency="NGN",
+            base_price_ngn=base_price_ngn,
+            base_price_usd=base_price_usd,
+            currency=currency,
             status="active",
             current_period_start=now,
             current_period_end=period_end,
@@ -68,7 +73,7 @@ class SubscriptionService:
 
         await subscription.insert()
 
-        print(f"✅ Subscription created: {user_id} - {plan_tier} ({billing_interval})")
+        print(f"✅ Subscription created: {user_id} - {plan_tier} ({billing_interval}) - {currency}")
         return subscription
 
     async def get_subscription(self, user_id: str) -> Optional[Subscription]:
@@ -109,15 +114,17 @@ class SubscriptionService:
         if not current_sub:
             raise ValueError("No active subscription found")
 
-        # Calculate prorated amount
+        # Calculate prorated amount, in the subscription's own currency
         new_plan = get_plan(PlanTier(new_tier))
-        current_plan = get_plan(PlanTier(current_sub.plan_tier))
+        currency = current_sub.currency
 
         # Get new plan price
-        if new_interval == "yearly":
-            new_price = new_plan.yearly_price_ngn
+        if currency == "USD":
+            new_price = new_plan.yearly_price_usd if new_interval == "yearly" else new_plan.monthly_price_usd
+            current_base_price = current_sub.base_price_usd
         else:
-            new_price = new_plan.monthly_price_ngn
+            new_price = new_plan.yearly_price_ngn if new_interval == "yearly" else new_plan.monthly_price_ngn
+            current_base_price = current_sub.base_price_ngn
 
         # Calculate remaining days in current period
         now = datetime.now(timezone.utc)
@@ -129,7 +136,7 @@ class SubscriptionService:
         else:
             total_days = 30
 
-        unused_amount = (current_sub.base_price_ngn / total_days) * remaining_days
+        unused_amount = ((current_base_price or 0.0) / total_days) * remaining_days
 
         # Amount to charge = new plan price - unused credit
         prorated_amount = max(new_price - unused_amount, 0)
@@ -137,9 +144,10 @@ class SubscriptionService:
         return {
             "current_plan": current_sub.plan_tier,
             "new_plan": new_tier,
-            "prorated_amount_ngn": round(prorated_amount, 2),
-            "unused_credit_ngn": round(unused_amount, 2),
-            "new_price_ngn": new_price,
+            "currency": currency,
+            "prorated_amount": round(prorated_amount, 2),
+            "unused_credit": round(unused_amount, 2),
+            "new_price": new_price,
             "remaining_days": remaining_days
         }
 
@@ -169,20 +177,27 @@ class SubscriptionService:
 
         # Get new plan
         new_plan = get_plan(PlanTier(new_tier))
+        currency = current_sub.currency
 
-        # Calculate new billing period
+        # Calculate new billing period, in the subscription's own currency
         now = datetime.now(timezone.utc)
+        if currency == "USD":
+            base_price_usd = new_plan.yearly_price_usd if new_interval == "yearly" else new_plan.monthly_price_usd
+            base_price_ngn = None
+        else:
+            base_price_ngn = new_plan.yearly_price_ngn if new_interval == "yearly" else new_plan.monthly_price_ngn
+            base_price_usd = None
+
         if new_interval == "yearly":
             period_end = now + timedelta(days=365)
-            base_price = new_plan.yearly_price_ngn
         else:
             period_end = now + timedelta(days=30)
-            base_price = new_plan.monthly_price_ngn
 
         # Update subscription
         current_sub.plan_tier = new_tier
         current_sub.billing_interval = new_interval
-        current_sub.base_price_ngn = base_price
+        current_sub.base_price_ngn = base_price_ngn
+        current_sub.base_price_usd = base_price_usd
         current_sub.current_period_start = now
         current_sub.current_period_end = period_end
         current_sub.last_payment_ref = payment_ref
@@ -359,6 +374,8 @@ class SubscriptionService:
             "days_until_renewal": days_until_renewal,
             "cancel_at_period_end": subscription.cancel_at_period_end,
             "base_price_ngn": subscription.base_price_ngn,
+            "base_price_usd": subscription.base_price_usd,
+            "currency": subscription.currency,
             "monthly_credits": plan.monthly_credits,
             "max_api_keys": plan.max_api_keys,
             "features": {

@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 from app.core.config import settings
 from app.api.v1.api import api_router
 from app.db.mongodb import connect_to_mongodb, close_mongodb_connection
+from app.services.scheduler import start_background_jobs, stop_background_jobs
 
 
 @asynccontextmanager
@@ -12,8 +13,10 @@ async def lifespan(app: FastAPI):
     """Lifespan context manager for startup and shutdown events."""
     # Startup
     await connect_to_mongodb()
+    start_background_jobs()
     yield
     # Shutdown
+    stop_background_jobs()
     await close_mongodb_connection()
 
 

@@ -11,6 +11,8 @@ from app.core.api_key import hash_api_key
 from app.services.usage_tracker import check_rate_limit
 from app.services.usage_service import usage_service
 from app.services.ip_validator import get_client_ip, require_ip_whitelist
+from app.services.webhook_dispatcher import trigger_event
+from app.models.webhook import WebhookEvent
 
 
 async def validate_api_key(
@@ -89,13 +91,30 @@ async def validate_api_key(
 
     # Check rate limits (will raise 429 if exceeded) — raw request throttling,
     # unrelated to billing, protects infrastructure regardless of plan.
-    await check_rate_limit(api_key.id)
+    try:
+        await check_rate_limit(api_key.id)
+    except HTTPException:
+        await trigger_event(
+            developer_id=api_key.developer_id,
+            event=WebhookEvent.RATE_LIMIT_EXCEEDED,
+            payload={"api_key_id": str(api_key.id)},
+        )
+        raise
 
     # Check monthly credit quota — only free-tier developers are ever
     # blocked here (paid tiers allow overage, billed later via invoice), so
     # this only queries the database for free-tier callers.
     quota = await usage_service.check_credit_quota(str(api_key.developer_id))
     if not quota["allowed"]:
+        await trigger_event(
+            developer_id=api_key.developer_id,
+            event=WebhookEvent.QUOTA_EXCEEDED,
+            payload={
+                "api_key_id": str(api_key.id),
+                "current_usage": quota["current_usage"],
+                "limit": quota["limit"],
+            },
+        )
         raise HTTPException(
             status_code=status.HTTP_402_PAYMENT_REQUIRED,
             detail=quota["reason"],

@@ -12,6 +12,8 @@ from app.services.subscription_service import subscription_service
 from app.services.usage_service import usage_service
 from app.services.invoice_service import invoice_service
 from app.core.pricing import PRICING_TIERS, PlanTier, BillingInterval
+from app.services.webhook_dispatcher import trigger_event
+from app.models.webhook import WebhookEvent
 
 router = APIRouter(prefix="/billing", tags=["Billing"])
 
@@ -33,6 +35,7 @@ class InitializePaymentRequest(BaseModel):
     """Request to initialize payment"""
     plan_tier: str = Field(..., description="starter, professional, or enterprise")
     billing_interval: str = Field(default="monthly", description="monthly or yearly")
+    currency: str = Field(default="NGN", description="NGN or USD")
 
 
 class VerifyPaymentRequest(BaseModel):
@@ -46,6 +49,13 @@ class UpgradeSubscriptionRequest(BaseModel):
     new_interval: str = Field(default="monthly", description="New billing interval")
 
 
+class ApplyUpgradeRequest(BaseModel):
+    """Request to apply a previously-quoted subscription upgrade after payment"""
+    new_tier: str = Field(..., description="New plan tier")
+    new_interval: str = Field(default="monthly", description="New billing interval")
+    transaction_ref: str = Field(..., description="Squad transaction reference for the prorated upgrade payment")
+
+
 # ==================== Pricing & Plans ====================
 
 @router.get("/plans")
@@ -53,7 +63,7 @@ async def get_pricing_plans():
     """
     Get all available pricing plans
 
-    Returns all subscription tiers with pricing in NGN
+    Returns all subscription tiers with pricing in both NGN and USD
     """
     plans = []
 
@@ -65,7 +75,8 @@ async def get_pricing_plans():
             "pricing": {
                 "monthly_ngn": plan.monthly_price_ngn,
                 "yearly_ngn": plan.yearly_price_ngn,
-                "currency": "NGN",
+                "monthly_usd": plan.monthly_price_usd,
+                "yearly_usd": plan.yearly_price_usd,
                 "yearly_discount": "20%"
             },
             "quotas": {
@@ -76,6 +87,7 @@ async def get_pricing_plans():
             },
             "overage": {
                 "rate_per_credit_ngn": plan.overage_rate_per_credit_ngn,
+                "rate_per_credit_usd": plan.overage_rate_per_credit_usd,
                 "allowed": tier != PlanTier.FREE
             },
             "features": {
@@ -114,7 +126,7 @@ async def initialize_payment(
     4. Return payment URL and public key for inline modal
     """
     try:
-        print(f"🔵 Initialize payment request - User: {developer.email}, Tier: {body.plan_tier}, Interval: {body.billing_interval}")
+        print(f"🔵 Initialize payment request - User: {developer.email}, Tier: {body.plan_tier}, Interval: {body.billing_interval}, Currency: {body.currency}")
 
         user_id = str(developer.id)
         user_email = developer.email
@@ -126,23 +138,32 @@ async def initialize_payment(
                 detail="Invalid plan tier. Must be starter, professional, or enterprise"
             )
 
+        # Validate currency
+        if body.currency not in ["NGN", "USD"]:
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid currency. Must be NGN or USD"
+            )
+
         # Get plan pricing
         plan_enum = PlanTier(body.plan_tier)
         plan = PRICING_TIERS[plan_enum]
 
-        if body.billing_interval == "yearly":
-            amount_ngn = plan.yearly_price_ngn
+        if body.currency == "USD":
+            amount = plan.yearly_price_usd if body.billing_interval == "yearly" else plan.monthly_price_usd
         else:
-            amount_ngn = plan.monthly_price_ngn
+            amount = plan.yearly_price_ngn if body.billing_interval == "yearly" else plan.monthly_price_ngn
 
-        print(f"💰 Amount calculated: ₦{amount_ngn:,.2f}")
+        currency_symbol = "$" if body.currency == "USD" else "₦"
+        print(f"💰 Amount calculated: {currency_symbol}{amount:,.2f} {body.currency}")
 
         # Initialize payment
         result = await payment_service.initialize_payment(
             user_id=user_id,
             plan_tier=body.plan_tier,
             billing_interval=body.billing_interval,
-            amount_ngn=amount_ngn,
+            amount=amount,
+            currency=body.currency,
             user_email=user_email
         )
 
@@ -188,7 +209,20 @@ async def verify_payment(
                     user_id=payment.user_id,
                     plan_tier=payment.plan_tier,
                     billing_interval=payment.billing_interval,
-                    payment_ref=payment.transaction_ref
+                    payment_ref=payment.transaction_ref,
+                    currency=payment.currency
+                )
+
+                await trigger_event(
+                    developer_id=developer.id,
+                    event=WebhookEvent.PAYMENT_SUCCEEDED,
+                    payload={
+                        "transaction_ref": payment.transaction_ref,
+                        "plan_tier": subscription.plan_tier,
+                        "billing_interval": subscription.billing_interval,
+                        "amount": payment.amount_usd if payment.currency == "USD" else payment.amount_ngn,
+                        "currency": payment.currency,
+                    }
                 )
 
                 return {
@@ -235,22 +269,50 @@ async def squad_webhook(
 
             if transaction_ref:
                 from app.models.billing import PaymentTransaction
+                from beanie import PydanticObjectId
                 payment = await PaymentTransaction.find_one(
                     PaymentTransaction.transaction_ref == transaction_ref
                 )
 
-                if payment and payment.status == "completed" and not payment.subscription_id:
-                    # Create subscription
-                    subscription = await subscription_service.create_subscription(
-                        user_id=payment.user_id,
-                        plan_tier=payment.plan_tier,
-                        billing_interval=payment.billing_interval,
-                        payment_ref=transaction_ref
-                    )
+                if payment:
+                    developer_id = PydanticObjectId(payment.user_id)
 
-                    # Link subscription to payment
-                    payment.subscription_id = str(subscription.id)
-                    await payment.save()
+                    if payment.status == "completed" and not payment.subscription_id:
+                        # Create subscription
+                        subscription = await subscription_service.create_subscription(
+                            user_id=payment.user_id,
+                            plan_tier=payment.plan_tier,
+                            billing_interval=payment.billing_interval,
+                            payment_ref=transaction_ref,
+                            currency=payment.currency
+                        )
+
+                        # Link subscription to payment
+                        payment.subscription_id = str(subscription.id)
+                        await payment.save()
+
+                        await trigger_event(
+                            developer_id=developer_id,
+                            event=WebhookEvent.PAYMENT_SUCCEEDED,
+                            payload={
+                                "transaction_ref": transaction_ref,
+                                "plan_tier": payment.plan_tier,
+                                "billing_interval": payment.billing_interval,
+                                "amount": payment.amount_usd if payment.currency == "USD" else payment.amount_ngn,
+                                "currency": payment.currency,
+                            }
+                        )
+                    elif payment.status == "failed":
+                        await trigger_event(
+                            developer_id=developer_id,
+                            event=WebhookEvent.PAYMENT_FAILED,
+                            payload={
+                                "transaction_ref": transaction_ref,
+                                "plan_tier": payment.plan_tier,
+                                "billing_interval": payment.billing_interval,
+                                "currency": payment.currency,
+                            }
+                        )
 
             return {"success": True, "message": "Webhook processed"}
 
@@ -314,6 +376,60 @@ async def upgrade_subscription(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.post("/subscription/upgrade/apply")
+async def apply_subscription_upgrade(
+    body: ApplyUpgradeRequest,
+    developer: Developer = Depends(get_current_developer)
+):
+    """
+    Apply a previously-quoted subscription upgrade after the prorated
+    payment has been completed via Squad.
+
+    This is the second step of the upgrade flow: POST /subscription/upgrade
+    only returns a quote, it never changes the subscription — this endpoint
+    verifies the quoted payment actually went through, then applies it.
+    """
+    try:
+        user_id = str(developer.id)
+
+        verified = await payment_service.verify_payment(body.transaction_ref)
+        if not verified:
+            raise HTTPException(status_code=402, detail="Upgrade payment not verified")
+
+        subscription = await subscription_service.apply_upgrade(
+            user_id=user_id,
+            new_tier=body.new_tier,
+            new_interval=body.new_interval,
+            payment_ref=body.transaction_ref
+        )
+
+        await trigger_event(
+            developer_id=developer.id,
+            event=WebhookEvent.SUBSCRIPTION_UPDATED,
+            payload={
+                "plan_tier": subscription.plan_tier,
+                "billing_interval": subscription.billing_interval,
+                "currency": subscription.currency,
+            }
+        )
+
+        return {
+            "success": True,
+            "data": {
+                "subscription_id": str(subscription.id),
+                "plan_tier": subscription.plan_tier,
+                "status": subscription.status
+            }
+        }
+
+    except HTTPException:
+        raise
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.post("/subscription/cancel")
 async def cancel_subscription(developer: Developer = Depends(get_current_developer)):
     """
@@ -325,6 +441,12 @@ async def cancel_subscription(developer: Developer = Depends(get_current_develop
         result = await subscription_service.cancel_subscription(
             user_id=user_id,
             immediate=False
+        )
+
+        await trigger_event(
+            developer_id=developer.id,
+            event=WebhookEvent.SUBSCRIPTION_CANCELLED,
+            payload=result
         )
 
         return {
@@ -479,6 +601,7 @@ async def get_payment_history(
                 "id": str(payment.id),
                 "transaction_ref": payment.transaction_ref,
                 "amount_ngn": payment.amount_ngn,
+                "amount_usd": payment.amount_usd,
                 "currency": payment.currency,
                 "status": payment.status,
                 "plan_tier": payment.plan_tier,
