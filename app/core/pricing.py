@@ -30,13 +30,20 @@ class PricingPlan(BaseModel):
     monthly_price_ngn: float  # NGN
     yearly_price_ngn: float  # NGN (discounted)
 
-    # Request quotas
-    monthly_requests: int  # Included requests per month
+    # Credit quota — a "credit" is one real AI-generation action (as reported
+    # by uri-social-backend via the X-URI-Credits-Consumed response header),
+    # not a raw API request. Requests that don't generate anything (reads,
+    # connection management, webhooks, etc.) cost 0 credits and don't count
+    # against this quota.
+    monthly_credits: int  # Included generation credits per month
+
+    # Raw request throttling — unrelated to billing, protects infrastructure
+    # regardless of whether a request actually costs credits.
     hourly_rate_limit: int  # Max requests per hour
     daily_rate_limit: int  # Max requests per day
 
     # Overage pricing
-    overage_rate_per_1k_ngn: float  # NGN per 1000 requests over quota
+    overage_rate_per_credit_ngn: float  # NGN per credit over quota
 
     # Features
     max_api_keys: int  # Maximum number of API keys
@@ -58,6 +65,16 @@ class PricingPlan(BaseModel):
 
 # Enterprise-grade pricing tiers (Nigerian Naira - NGN)
 # Exchange rate reference: $1 ≈ ₦1,600 (subject to market rates)
+#
+# PLACEHOLDER NOTICE: monthly_credits and overage_rate_per_credit_ngn below
+# are structural placeholders, not final business numbers. A "credit" here
+# is a real AI-generation action with a real upstream cost (OpenAI/fal.ai
+# etc.) — unlike a raw request, credits cannot be priced from request-volume
+# assumptions alone. These values need to be set from real unit-economics
+# (actual cost per credit) before this goes live; only the base
+# subscription prices (monthly_price_ngn/yearly_price_ngn) and the tier
+# structure itself are carried over unchanged from the prior request-based
+# model.
 PRICING_TIERS: Dict[PlanTier, PricingPlan] = {
     PlanTier.FREE: PricingPlan(
         tier=PlanTier.FREE,
@@ -65,10 +82,10 @@ PRICING_TIERS: Dict[PlanTier, PricingPlan] = {
         description="Perfect for testing and small projects",
         monthly_price_ngn=0.0,
         yearly_price_ngn=0.0,
-        monthly_requests=100,  # 100 requests per month
+        monthly_credits=100,  # PLACEHOLDER — 100 generation credits per month
         hourly_rate_limit=10,
         daily_rate_limit=100,
-        overage_rate_per_1k_ngn=0.0,  # No overage, hard limit
+        overage_rate_per_credit_ngn=0.0,  # No overage, hard limit
         max_api_keys=1,
         api_key_expiry_days=None,  # Never expires
         ip_whitelisting=False,
@@ -88,10 +105,10 @@ PRICING_TIERS: Dict[PlanTier, PricingPlan] = {
         description="For growing startups and small businesses",
         monthly_price_ngn=75_000.0,  # ≈ $47
         yearly_price_ngn=720_000.0,  # ~20% discount (2 months free)
-        monthly_requests=50_000,
+        monthly_credits=2_000,  # PLACEHOLDER — needs real unit-economics review
         hourly_rate_limit=5_000,
         daily_rate_limit=50_000,
-        overage_rate_per_1k_ngn=800.0,  # ₦800 per 1000 requests
+        overage_rate_per_credit_ngn=40.0,  # PLACEHOLDER — ₦ per credit over quota
         max_api_keys=5,
         api_key_expiry_days=365,  # 1 year
         ip_whitelisting=True,
@@ -111,10 +128,10 @@ PRICING_TIERS: Dict[PlanTier, PricingPlan] = {
         description="For established businesses with high volume",
         monthly_price_ngn=320_000.0,  # ≈ $200
         yearly_price_ngn=3_072_000.0,  # ~20% discount
-        monthly_requests=500_000,
+        monthly_credits=20_000,  # PLACEHOLDER — needs real unit-economics review
         hourly_rate_limit=50_000,
         daily_rate_limit=500_000,
-        overage_rate_per_1k_ngn=480.0,  # ₦480 per 1000 requests
+        overage_rate_per_credit_ngn=24.0,  # PLACEHOLDER — ₦ per credit over quota
         max_api_keys=25,
         api_key_expiry_days=730,  # 2 years
         ip_whitelisting=True,
@@ -134,10 +151,10 @@ PRICING_TIERS: Dict[PlanTier, PricingPlan] = {
         description="Custom solutions for large organizations",
         monthly_price_ngn=1_600_000.0,  # ≈ $1,000
         yearly_price_ngn=15_360_000.0,  # ~20% discount
-        monthly_requests=10_000_000,
+        monthly_credits=500_000,  # PLACEHOLDER — needs real unit-economics review
         hourly_rate_limit=1_000_000,
         daily_rate_limit=10_000_000,
-        overage_rate_per_1k_ngn=160.0,  # ₦160 per 1000 requests
+        overage_rate_per_credit_ngn=8.0,  # PLACEHOLDER — ₦ per credit over quota
         max_api_keys=100,
         api_key_expiry_days=None,  # Never expires (or custom)
         ip_whitelisting=True,
@@ -158,59 +175,58 @@ def get_plan(tier: PlanTier) -> PricingPlan:
     return PRICING_TIERS[tier]
 
 
-def calculate_overage_cost(plan: PricingPlan, total_requests: int) -> float:
+def calculate_overage_cost(plan: PricingPlan, total_credits: int) -> float:
     """
-    Calculate overage cost for requests exceeding monthly quota
+    Calculate overage cost for AI-generation credits exceeding monthly quota
 
     Args:
         plan: Pricing plan
-        total_requests: Total requests made this billing period
+        total_credits: Total generation credits consumed this billing period
 
     Returns:
         Overage cost in NGN
     """
-    if total_requests <= plan.monthly_requests:
+    if total_credits <= plan.monthly_credits:
         return 0.0
 
-    overage_requests = total_requests - plan.monthly_requests
-    overage_thousands = overage_requests / 1000
+    overage_credits = total_credits - plan.monthly_credits
 
-    return round(overage_thousands * plan.overage_rate_per_1k_ngn, 2)
+    return round(overage_credits * plan.overage_rate_per_credit_ngn, 2)
 
 
 def calculate_total_cost(
     plan: PricingPlan,
     billing_interval: BillingInterval,
-    total_requests: int
+    total_credits: int
 ) -> Dict[str, float]:
     """
-    Calculate total cost including base price and overage
+    Calculate total cost including base price and credit overage
 
     Args:
         plan: Pricing plan
         billing_interval: Monthly or yearly
-        total_requests: Total requests made this billing period
+        total_credits: Total generation credits consumed this billing period
 
     Returns:
         Dict with breakdown: {
             "base_price": float,
             "overage_cost": float,
             "total": float,
-            "requests_included": int,
-            "requests_overage": int
+            "credits_included": int,
+            "credits_overage": int
         }
     """
     base_price = plan.monthly_price_ngn if billing_interval == BillingInterval.MONTHLY else plan.yearly_price_ngn
-    overage_cost = calculate_overage_cost(plan, total_requests)
+    overage_cost = calculate_overage_cost(plan, total_credits)
 
-    overage_requests = max(0, total_requests - plan.monthly_requests)
+    overage_credits = max(0, total_credits - plan.monthly_credits)
 
     return {
         "base_price": base_price,
         "overage_cost": overage_cost,
         "total": round(base_price + overage_cost, 2),
-        "requests_included": min(total_requests, plan.monthly_requests),
-        "requests_overage": overage_requests,
+        "credits_included": min(total_credits, plan.monthly_credits),
+        "credits_overage": overage_credits,
     }
 
 
@@ -219,5 +235,5 @@ def get_rate_limits(plan: PricingPlan) -> Dict[str, int]:
     return {
         "hourly": plan.hourly_rate_limit,
         "daily": plan.daily_rate_limit,
-        "monthly": plan.monthly_requests,
+        "monthly_credits": plan.monthly_credits,
     }

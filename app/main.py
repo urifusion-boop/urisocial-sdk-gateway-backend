@@ -43,9 +43,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Usage tracking middleware for billing
-from app.middleware.usage_tracking import UsageTrackingMiddleware
-app.add_middleware(UsageTrackingMiddleware)
+# Note: usage tracking/rate-limiting for billing is done directly in
+# app/api/v1/endpoints/proxy.py and app/middleware/api_key_validation.py
+# (per-request, on the actual proxy paths) rather than via a global
+# middleware — see app/services/usage_service.py for why.
 
 # Include API router
 app.include_router(api_router, prefix="/api/v1")

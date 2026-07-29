@@ -92,45 +92,6 @@ class PaymentTransaction(Document):
         ]
 
 
-class UsageRecord(Document):
-    """
-    API usage tracking for billing and analytics
-    Aggregated usage data per user per billing period
-    """
-    user_id: str = Field(..., description="User ID")
-    subscription_id: Optional[str] = Field(None, description="Associated subscription")
-
-    # Time period (billing cycle)
-    period_start: datetime = Field(..., description="Billing period start")
-    period_end: datetime = Field(..., description="Billing period end")
-    period_month: str = Field(..., description="YYYY-MM for easy querying")
-
-    # Usage metrics
-    total_requests: int = Field(default=0, description="Total API requests")
-    successful_requests: int = Field(default=0, description="2xx responses")
-    failed_requests: int = Field(default=0, description="4xx/5xx responses")
-
-    # Endpoint breakdown {"/v1/social-media/generate": 1500, ...}
-    endpoint_usage: Dict[str, int] = Field(default_factory=dict, description="Per-endpoint request counts")
-
-    # Billing calculations
-    included_requests: int = Field(..., description="Requests included in plan quota")
-    overage_requests: int = Field(default=0, description="Requests beyond quota")
-    overage_cost_ngn: float = Field(default=0.0, description="Overage charges in NGN")
-
-    # Timestamps
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-
-    class Settings:
-        name = "usage_records"
-        indexes = [
-            "user_id",
-            "period_month",
-            "period_start",
-        ]
-
-
 class Invoice(Document):
     """
     Generated invoices for subscriptions and overage charges
@@ -179,39 +140,4 @@ class Invoice(Document):
             "invoice_number",
             "status",
             "period_start",
-        ]
-
-
-class UsageLog(Document):
-    """
-    Individual API request logs for detailed tracking
-    Used for billing, analytics, and debugging
-    """
-    user_id: str = Field(..., description="User making request")
-    api_key_id: str = Field(..., description="API key used")
-    workspace_id: Optional[str] = None
-
-    # Request details
-    endpoint: str = Field(..., description="API endpoint path")
-    method: str = Field(..., description="HTTP method")
-    status_code: int = Field(..., description="Response status code")
-
-    # Timing
-    duration_ms: float = Field(..., description="Request duration in milliseconds")
-    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-
-    # Metadata
-    ip_address: Optional[str] = None
-    user_agent: Optional[str] = None
-
-    # Billing
-    billable: bool = Field(default=True, description="Whether to count for billing")
-
-    class Settings:
-        name = "usage_logs"
-        indexes = [
-            "user_id",
-            "api_key_id",
-            "timestamp",
-            "endpoint",
         ]

@@ -322,7 +322,7 @@ class SubscriptionService:
                 "plan_tier": "free",
                 "plan_name": free_plan.name,
                 "status": "active",
-                "monthly_requests": free_plan.monthly_requests,
+                "monthly_credits": free_plan.monthly_credits,
                 "max_api_keys": free_plan.max_api_keys,
                 "features": {
                     "ip_whitelisting": free_plan.ip_whitelisting,
@@ -359,7 +359,7 @@ class SubscriptionService:
             "days_until_renewal": days_until_renewal,
             "cancel_at_period_end": subscription.cancel_at_period_end,
             "base_price_ngn": subscription.base_price_ngn,
-            "monthly_requests": plan.monthly_requests,
+            "monthly_credits": plan.monthly_credits,
             "max_api_keys": plan.max_api_keys,
             "features": {
                 "ip_whitelisting": plan.ip_whitelisting,

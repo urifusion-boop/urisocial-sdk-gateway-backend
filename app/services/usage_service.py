@@ -1,277 +1,250 @@
 """
 Usage Service
-Tracks API usage for billing and analytics
+Tracks real API usage and billable credit consumption for the current
+billing period.
+
+This reads directly from app.models.usage_log.UsageLog and
+RateLimitCounter — the same records the proxy itself writes on every
+request (see app/api/v1/endpoints/proxy.py and app/services/usage_tracker.py)
+and the same records app/middleware/api_key_validation.py's hourly/daily
+throttling reads. There used to be a second, parallel aggregation system
+(app.models.billing.UsageRecord + a second UsageLog class colliding with
+this one on the same MongoDB collection name) fed by a separate global
+middleware — it silently never tracked two of the three proxy routes
+(a real, confirmed bug) and duplicated a second API-key DB lookup on every
+request. That system has been removed; this is now the single source of
+truth for usage, billing, and quota enforcement.
+
+"Requests" and "credits" are deliberately different numbers: a request is
+any proxied API call; a credit is one real AI-generation action with a
+real upstream cost, as reported by uri-social-backend via the
+X-URI-Credits-Consumed response header. Only credits are billed/quota-
+limited; raw request volume is only ever throttled (hourly/daily), never
+charged for directly.
 """
 from datetime import datetime, timezone, timedelta
 from typing import Dict, Optional
-from app.models.billing import UsageRecord, UsageLog
+from beanie import PydanticObjectId
+
+from app.models.usage_log import UsageLog
 from app.services.subscription_service import subscription_service
 from app.core.pricing import get_plan, PlanTier, calculate_overage_cost
 
 
 class UsageService:
-    """API usage tracking and billing service"""
+    """Credit-based API usage tracking and billing service."""
 
-    async def track_request(
-        self,
-        user_id: str,
-        api_key_id: str,
-        endpoint: str,
-        method: str,
-        status_code: int,
-        duration_ms: float,
-        ip_address: Optional[str] = None,
-        user_agent: Optional[str] = None,
-        workspace_id: Optional[str] = None
-    ):
+    async def _get_period_and_plan(self, developer_id: str):
+        """Resolve the current billing-period window and plan for a developer.
+
+        Falls back to a calendar-month window on the free tier, matching
+        the previous system's behavior for developers with no subscription
+        document at all.
         """
-        Track individual API request for billing
-
-        Args:
-            user_id: User ID
-            api_key_id: API key used
-            endpoint: API endpoint path
-            method: HTTP method
-            status_code: Response status code
-            duration_ms: Request duration in milliseconds
-            ip_address: Client IP address
-            user_agent: Client user agent
-            workspace_id: Workspace ID
-        """
-        # Log individual request
-        usage_log = UsageLog(
-            user_id=user_id,
-            api_key_id=api_key_id,
-            workspace_id=workspace_id,
-            endpoint=endpoint,
-            method=method,
-            status_code=status_code,
-            duration_ms=duration_ms,
-            timestamp=datetime.now(timezone.utc),
-            ip_address=ip_address,
-            user_agent=user_agent,
-            billable=True
-        )
-        await usage_log.insert()
-
-        # Update aggregated usage record
-        await self._update_usage_record(user_id, endpoint, status_code)
-
-    async def _update_usage_record(self, user_id: str, endpoint: str, status_code: int):
-        """Update aggregated usage record for current billing period"""
-        # Get current subscription
-        subscription = await subscription_service.get_subscription(user_id)
+        subscription = await subscription_service.get_subscription(developer_id)
 
         if subscription:
             period_start = subscription.current_period_start
             period_end = subscription.current_period_end
-            subscription_id = str(subscription.id)
             plan_tier = PlanTier(subscription.plan_tier)
         else:
-            # Free tier - use calendar month
             now = datetime.now(timezone.utc)
             period_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
             period_end = (period_start + timedelta(days=32)).replace(day=1) - timedelta(seconds=1)
-            subscription_id = None
             plan_tier = PlanTier.FREE
 
-        period_month = period_start.strftime("%Y-%m")
+        return period_start, period_end, get_plan(plan_tier), plan_tier
 
-        # Get or create usage record
-        usage_record = await UsageRecord.find_one(
-            UsageRecord.user_id == user_id,
-            UsageRecord.period_month == period_month
-        )
+    async def _aggregate_totals(self, developer_id: str, period_start: datetime, period_end: datetime) -> Dict:
+        """DB-side aggregation of request/credit totals for a billing period.
 
-        if not usage_record:
-            plan = get_plan(plan_tier)
-            usage_record = UsageRecord(
-                user_id=user_id,
-                subscription_id=subscription_id,
-                period_start=period_start,
-                period_end=period_end,
-                period_month=period_month,
-                total_requests=0,
-                successful_requests=0,
-                failed_requests=0,
-                endpoint_usage={},
-                included_requests=plan.monthly_requests,
-                overage_requests=0,
-                overage_cost_ngn=0.0,
-                created_at=datetime.now(timezone.utc),
-                updated_at=datetime.now(timezone.utc)
-            )
-
-        # Update counts
-        usage_record.total_requests += 1
-
-        if 200 <= status_code < 400:
-            usage_record.successful_requests += 1
-        else:
-            usage_record.failed_requests += 1
-
-        # Update endpoint breakdown
-        if endpoint not in usage_record.endpoint_usage:
-            usage_record.endpoint_usage[endpoint] = 0
-        usage_record.endpoint_usage[endpoint] += 1
-
-        # Calculate overage
-        if usage_record.total_requests > usage_record.included_requests:
-            usage_record.overage_requests = usage_record.total_requests - usage_record.included_requests
-            plan = get_plan(plan_tier)
-            usage_record.overage_cost_ngn = calculate_overage_cost(plan, usage_record.total_requests)
-        else:
-            usage_record.overage_requests = 0
-            usage_record.overage_cost_ngn = 0.0
-
-        usage_record.updated_at = datetime.now(timezone.utc)
-
-        if usage_record.id:
-            await usage_record.save()
-        else:
-            await usage_record.insert()
-
-    async def get_current_usage(self, user_id: str) -> Dict:
+        Aggregates at the database level rather than loading individual
+        UsageLog documents into Python — a developer on a high-volume plan
+        can easily have hundreds of thousands of log rows in a period, and
+        pulling all of them into app memory on every usage check would not
+        scale.
         """
-        Get current billing period usage
+        pipeline = [
+            {
+                "$match": {
+                    "developer_id": PydanticObjectId(developer_id),
+                    "created_at": {"$gte": period_start, "$lte": period_end},
+                }
+            },
+            {
+                "$group": {
+                    "_id": None,
+                    "total_requests": {"$sum": 1},
+                    "successful_requests": {
+                        "$sum": {
+                            "$cond": [
+                                {"$and": [
+                                    {"$gte": ["$status_code", 200]},
+                                    {"$lt": ["$status_code", 400]},
+                                ]},
+                                1,
+                                0,
+                            ]
+                        }
+                    },
+                    "total_credits": {"$sum": "$credits_consumed"},
+                }
+            },
+        ]
+
+        results = await UsageLog.find(
+            UsageLog.developer_id == PydanticObjectId(developer_id)
+        ).aggregate(pipeline).to_list()
+
+        if not results:
+            return {"total_requests": 0, "successful_requests": 0, "total_credits": 0}
+
+        row = results[0]
+        return {
+            "total_requests": row.get("total_requests", 0),
+            "successful_requests": row.get("successful_requests", 0),
+            "total_credits": row.get("total_credits", 0),
+        }
+
+    async def get_current_usage(self, developer_id: str) -> Dict:
+        """
+        Get current billing period usage, in real credits.
 
         Args:
-            user_id: User ID
+            developer_id: Developer ID (str form of the gateway Developer._id)
 
         Returns:
             Dict with usage details
         """
-        # Get current subscription
-        subscription = await subscription_service.get_subscription(user_id)
+        period_start, period_end, plan, _plan_tier = await self._get_period_and_plan(developer_id)
+        totals = await self._aggregate_totals(developer_id, period_start, period_end)
 
-        if subscription:
-            period_month = subscription.current_period_start.strftime("%Y-%m")
-            plan_tier = PlanTier(subscription.plan_tier)
-        else:
-            # Free tier
-            now = datetime.now(timezone.utc)
-            period_month = now.strftime("%Y-%m")
-            plan_tier = PlanTier.FREE
+        total_requests = totals["total_requests"]
+        successful_requests = totals["successful_requests"]
+        failed_requests = total_requests - successful_requests
+        total_credits = totals["total_credits"]
 
-        # Get usage record
-        usage_record = await UsageRecord.find_one(
-            UsageRecord.user_id == user_id,
-            UsageRecord.period_month == period_month
-        )
-
-        plan = get_plan(plan_tier)
-
-        if not usage_record:
-            return {
-                "total_requests": 0,
-                "successful_requests": 0,
-                "failed_requests": 0,
-                "included_requests": plan.monthly_requests,
-                "overage_requests": 0,
-                "overage_cost_ngn": 0.0,
-                "percentage_used": 0.0,
-                "endpoint_usage": {}
-            }
-
-        percentage_used = (usage_record.total_requests / plan.monthly_requests) * 100 if plan.monthly_requests > 0 else 0
+        included_credits = plan.monthly_credits
+        overage_credits = max(0, total_credits - included_credits)
+        overage_cost_ngn = calculate_overage_cost(plan, total_credits)
+        percentage_used = (total_credits / included_credits * 100) if included_credits > 0 else 0.0
 
         return {
-            "total_requests": usage_record.total_requests,
-            "successful_requests": usage_record.successful_requests,
-            "failed_requests": usage_record.failed_requests,
-            "included_requests": usage_record.included_requests,
-            "overage_requests": usage_record.overage_requests,
-            "overage_cost_ngn": usage_record.overage_cost_ngn,
+            "total_requests": total_requests,
+            "successful_requests": successful_requests,
+            "failed_requests": failed_requests,
+            "total_credits": total_credits,
+            "included_credits": included_credits,
+            "overage_credits": overage_credits,
+            "overage_cost_ngn": overage_cost_ngn,
             "percentage_used": round(percentage_used, 2),
-            "endpoint_usage": usage_record.endpoint_usage,
-            "period_start": usage_record.period_start.isoformat(),
-            "period_end": usage_record.period_end.isoformat()
+            "period_start": period_start.isoformat(),
+            "period_end": period_end.isoformat(),
         }
 
-    async def calculate_overage(self, user_id: str) -> float:
+    async def calculate_overage(self, developer_id: str) -> float:
         """
-        Calculate overage charges for current period
+        Calculate credit overage charges for current period
 
         Args:
-            user_id: User ID
+            developer_id: Developer ID
 
         Returns:
             Overage cost in NGN
         """
-        usage = await self.get_current_usage(user_id)
+        usage = await self.get_current_usage(developer_id)
         return usage["overage_cost_ngn"]
 
-    async def get_usage_breakdown(self, user_id: str) -> Dict:
+    async def get_usage_breakdown(self, developer_id: str) -> Dict:
         """
-        Get endpoint-level usage analytics
+        Get endpoint-level usage analytics (request counts and credits
+        consumed per endpoint) for the current billing period.
 
         Args:
-            user_id: User ID
+            developer_id: Developer ID
 
         Returns:
             Dict with endpoint breakdown
         """
-        usage = await self.get_current_usage(user_id)
+        period_start, period_end, _plan, _plan_tier = await self._get_period_and_plan(developer_id)
 
-        # Sort endpoints by usage
-        endpoint_usage = usage["endpoint_usage"]
-        sorted_endpoints = sorted(
-            endpoint_usage.items(),
-            key=lambda x: x[1],
-            reverse=True
-        )
+        pipeline = [
+            {
+                "$match": {
+                    "developer_id": PydanticObjectId(developer_id),
+                    "created_at": {"$gte": period_start, "$lte": period_end},
+                }
+            },
+            {
+                "$group": {
+                    "_id": "$endpoint",
+                    "requests": {"$sum": 1},
+                    "credits": {"$sum": "$credits_consumed"},
+                }
+            },
+            {"$sort": {"requests": -1}},
+        ]
+
+        rows = await UsageLog.find(
+            UsageLog.developer_id == PydanticObjectId(developer_id)
+        ).aggregate(pipeline).to_list()
+
+        total_requests = sum(row["requests"] for row in rows)
 
         return {
-            "total_requests": usage["total_requests"],
+            "total_requests": total_requests,
             "endpoints": [
                 {
-                    "endpoint": endpoint,
-                    "requests": count,
-                    "percentage": round((count / usage["total_requests"]) * 100, 2) if usage["total_requests"] > 0 else 0
+                    "endpoint": row["_id"],
+                    "requests": row["requests"],
+                    "credits": row["credits"],
+                    "percentage": round((row["requests"] / total_requests) * 100, 2) if total_requests > 0 else 0,
                 }
-                for endpoint, count in sorted_endpoints
-            ]
+                for row in rows
+            ],
         }
 
-    async def check_rate_limit(self, user_id: str) -> Dict:
+    async def check_credit_quota(self, developer_id: str) -> Dict:
         """
-        Check if user has exceeded rate limits
+        Check whether a developer may proceed, based on monthly credit quota.
+
+        Only the free tier hard-blocks on quota exhaustion (matching the
+        prior system's semantics) — paid tiers always allow the request and
+        accrue overage, billed later via the invoice. Because of that, this
+        only runs the aggregation query for free-tier developers; paid-tier
+        callers skip it entirely, keeping this cheap on the hot request path.
 
         Args:
-            user_id: User ID
+            developer_id: Developer ID
 
         Returns:
-            Dict with rate limit status
+            Dict with quota status
         """
-        # Get subscription
-        subscription = await subscription_service.get_subscription(user_id)
+        _period_start, _period_end, plan, plan_tier = await self._get_period_and_plan(developer_id)
 
-        if subscription:
-            plan_tier = PlanTier(subscription.plan_tier)
-        else:
-            plan_tier = PlanTier.FREE
+        if plan_tier != PlanTier.FREE:
+            return {
+                "allowed": True,
+                "overage_allowed": True,
+            }
 
-        plan = get_plan(plan_tier)
-        usage = await self.get_current_usage(user_id)
+        usage = await self.get_current_usage(developer_id)
+        quota_exceeded = usage["total_credits"] >= plan.monthly_credits
 
-        # Check monthly limit
-        monthly_limit_exceeded = usage["total_requests"] >= plan.monthly_requests
-
-        # For free tier, block overage
-        if plan_tier == PlanTier.FREE and monthly_limit_exceeded:
+        if quota_exceeded:
             return {
                 "allowed": False,
-                "reason": "Monthly request limit exceeded. Please upgrade your plan.",
-                "limit_type": "monthly",
-                "current_usage": usage["total_requests"],
-                "limit": plan.monthly_requests
+                "reason": "Monthly credit quota exceeded. Please upgrade your plan.",
+                "limit_type": "monthly_credits",
+                "current_usage": usage["total_credits"],
+                "limit": plan.monthly_credits,
             }
 
         return {
             "allowed": True,
-            "current_usage": usage["total_requests"],
-            "monthly_limit": plan.monthly_requests,
-            "overage_allowed": plan_tier != PlanTier.FREE
+            "overage_allowed": False,
+            "current_usage": usage["total_credits"],
+            "limit": plan.monthly_credits,
         }
 
 

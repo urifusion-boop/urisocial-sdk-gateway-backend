@@ -7,7 +7,7 @@ from app.models.workspace import Workspace
 from app.models.workspace_member import WorkspaceMember
 from app.models.usage_log import UsageLog, RateLimitCounter
 from app.models.webhook import Webhook, WebhookDelivery
-from app.models.billing import Subscription, PaymentTransaction, UsageRecord, Invoice, UsageLog as BillingUsageLog
+from app.models.billing import Subscription, PaymentTransaction, Invoice
 
 
 class MongoDB:
@@ -38,9 +38,7 @@ async def connect_to_mongodb():
             WebhookDelivery,
             Subscription,
             PaymentTransaction,
-            UsageRecord,
             Invoice,
-            BillingUsageLog,  # Add billing usage log
         ],
     )
     print(f"✅ Connected to MongoDB: {settings.DATABASE_NAME}")

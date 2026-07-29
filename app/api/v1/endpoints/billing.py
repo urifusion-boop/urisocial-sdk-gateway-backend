@@ -69,13 +69,13 @@ async def get_pricing_plans():
                 "yearly_discount": "20%"
             },
             "quotas": {
-                "monthly_requests": plan.monthly_requests,
+                "monthly_credits": plan.monthly_credits,
                 "hourly_rate_limit": plan.hourly_rate_limit,
                 "daily_rate_limit": plan.daily_rate_limit,
                 "max_api_keys": plan.max_api_keys
             },
             "overage": {
-                "rate_per_1k_ngn": plan.overage_rate_per_1k_ngn,
+                "rate_per_credit_ngn": plan.overage_rate_per_credit_ngn,
                 "allowed": tier != PlanTier.FREE
             },
             "features": {

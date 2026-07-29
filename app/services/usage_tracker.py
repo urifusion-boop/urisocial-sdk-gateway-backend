@@ -121,6 +121,7 @@ async def log_request(
     ip_address: Optional[str] = None,
     user_agent: Optional[str] = None,
     error_message: Optional[str] = None,
+    credits_consumed: int = 0,
 ) -> None:
     """
     Log API request for analytics and debugging.
@@ -136,6 +137,8 @@ async def log_request(
         ip_address: Client IP address
         user_agent: User agent string
         error_message: Error message if request failed
+        credits_consumed: Real URI Social credit cost of this request, as
+            reported by the main backend (0 for non-generation requests)
     """
     log = UsageLog(
         api_key_id=api_key_id,
@@ -148,5 +151,6 @@ async def log_request(
         ip_address=ip_address,
         user_agent=user_agent,
         error_message=error_message,
+        credits_consumed=credits_consumed,
     )
     await log.insert()

@@ -4,7 +4,7 @@ Generates and manages invoices for subscriptions and overage charges
 """
 from datetime import datetime, timezone, timedelta
 from typing import Optional, List, Dict
-from app.models.billing import Invoice, Subscription, UsageRecord
+from app.models.billing import Invoice, Subscription
 from app.services.usage_service import usage_service
 
 
@@ -63,11 +63,11 @@ class InvoiceService:
             })
 
         if overage_charge > 0:
-            overage_requests = usage["overage_requests"]
+            overage_credits = usage["overage_credits"]
             line_items.append({
-                "description": f"Additional API Requests ({overage_requests:,} requests)",
-                "quantity": overage_requests,
-                "unit_price_ngn": overage_charge / overage_requests if overage_requests > 0 else 0,
+                "description": f"Additional AI-Generation Credits ({overage_credits:,} credits)",
+                "quantity": overage_credits,
+                "unit_price_ngn": overage_charge / overage_credits if overage_credits > 0 else 0,
                 "total_ngn": overage_charge
             })
 

@@ -9,6 +9,7 @@ from beanie import PydanticObjectId
 from app.models.api_key import APIKey
 from app.core.api_key import hash_api_key
 from app.services.usage_tracker import check_rate_limit
+from app.services.usage_service import usage_service
 from app.services.ip_validator import get_client_ip, require_ip_whitelist
 
 
@@ -86,8 +87,23 @@ async def validate_api_key(
     client_ip = get_client_ip(request)
     require_ip_whitelist(api_key, client_ip)
 
-    # Check rate limits (will raise 429 if exceeded)
+    # Check rate limits (will raise 429 if exceeded) — raw request throttling,
+    # unrelated to billing, protects infrastructure regardless of plan.
     await check_rate_limit(api_key.id)
+
+    # Check monthly credit quota — only free-tier developers are ever
+    # blocked here (paid tiers allow overage, billed later via invoice), so
+    # this only queries the database for free-tier callers.
+    quota = await usage_service.check_credit_quota(str(api_key.developer_id))
+    if not quota["allowed"]:
+        raise HTTPException(
+            status_code=status.HTTP_402_PAYMENT_REQUIRED,
+            detail=quota["reason"],
+            headers={
+                "X-Credits-Limit": str(quota["limit"]),
+                "X-Credits-Used": str(quota["current_usage"]),
+            },
+        )
 
     # Update last_used_at timestamp and metadata (timezone-aware)
     api_key.last_used_at = now.replace(tzinfo=None)  # Store as naive UTC in MongoDB

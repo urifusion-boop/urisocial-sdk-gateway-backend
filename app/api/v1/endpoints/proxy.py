@@ -3,7 +3,7 @@ Proxy endpoints to forward authenticated requests to main backend
 """
 import httpx
 import time
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 from fastapi import APIRouter, Request, Response, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
 
@@ -15,6 +15,18 @@ router = APIRouter()
 
 # Main backend URL from settings
 MAIN_BACKEND_URL = getattr(settings, "MAIN_BACKEND_URL", "https://api.urisocial.com")
+
+
+def _parse_credits_header(raw: Optional[str]) -> int:
+    """Defensively parse X-URI-Credits-Consumed — malformed/missing always
+    means 0, never an error that could break the proxy response."""
+    if not raw:
+        return 0
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, value)
 
 
 async def proxy_request(
@@ -85,6 +97,13 @@ async def proxy_request(
                 workspace_id=developer_context.get("workspace_id"),
             )
 
+            # Real cost of this request in URI Social credits, reported by the
+            # main backend on generation endpoints (see
+            # complete_social_manager.py's _report_sdk_credit_cost). Absent/
+            # invalid on every other request, which is the correct default —
+            # only generation actions have a real AI-generation cost to meter.
+            credits_consumed = _parse_credits_header(response.headers.get("x-uri-credits-consumed"))
+
             # Log request (fire and forget)
             await log_request(
                 api_key_id=developer_context["api_key_id"],
@@ -96,6 +115,7 @@ async def proxy_request(
                 response_time_ms=response_time_ms,
                 ip_address=client_ip,
                 user_agent=user_agent,
+                credits_consumed=credits_consumed,
             )
 
             # Return response with same status code and headers

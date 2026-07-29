@@ -16,6 +16,14 @@ class UsageLog(Document):
     user_agent: Optional[str] = None
     error_message: Optional[str] = None
 
+    # Real cost of this request in URI Social credits, reported by the main
+    # backend via the X-URI-Credits-Consumed response header (see
+    # complete_social_manager.py's _report_sdk_credit_cost). 0 for requests
+    # that don't consume AI-generation credits (reads, connection management,
+    # etc.) — this is what invoicing sums per billing period, distinct from
+    # the flat per-request rate limiting in RateLimitCounter below.
+    credits_consumed: int = Field(default=0, index=True)
+
     created_at: datetime = Field(default_factory=datetime.utcnow, index=True)
 
     class Settings:
