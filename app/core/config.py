@@ -28,6 +28,11 @@ class Settings(BaseSettings):
     # Main Backend URL
     MAIN_BACKEND_URL: str = "https://api.urisocial.com"
 
+    # Shared secret proving proxied requests actually came from this
+    # gateway — must match uri-social-backend's SDK_GATEWAY_INTERNAL_SECRET
+    # exactly (a per-deployment secret, never a fixed/guessable literal).
+    SDK_GATEWAY_INTERNAL_SECRET: str = ""
+
     # Email/SMTP
     SMTP_HOST: str = ""
     SMTP_PORT: int = 465

@@ -68,9 +68,10 @@ async def proxy_request(
         headers["X-Workspace-ID"] = str(developer_context["workspace_id"])
     headers["X-API-Key-ID"] = str(developer_context["api_key_id"])
 
-    # Add internal service token for main backend authentication
-    # TODO: Generate proper service token - for now using a placeholder
-    headers["X-Internal-Service"] = "sdk-gateway"
+    # Prove this request actually came from the gateway (not a forged
+    # header sent directly to the main backend) via a shared secret that
+    # must match uri-social-backend's SDK_GATEWAY_INTERNAL_SECRET exactly.
+    headers["X-Internal-Service"] = settings.SDK_GATEWAY_INTERNAL_SECRET
 
     # Get client info for logging
     client_ip = request.client.host if request.client else None

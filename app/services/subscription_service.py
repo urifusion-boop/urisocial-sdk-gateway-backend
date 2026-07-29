@@ -251,44 +251,56 @@ class SubscriptionService:
             "access_until": subscription.current_period_end.isoformat() if not immediate else now.isoformat()
         }
 
-    async def renew_subscription(self, subscription_id: str) -> bool:
+    async def process_expired_periods(self) -> None:
         """
-        Process subscription renewal (called by cron job)
+        Periodic (non-request-path) housekeeping: for every active
+        subscription whose current_period_end has already passed, close
+        out that billing period with a real invoice, then either cancel it
+        (if cancel_at_period_end was set) or mark it past_due.
 
-        Args:
-            subscription_id: Subscription ID to renew
+        There is no tokenized/recurring payment mechanism here — every
+        payment is a fresh Squad checkout redirect — so this cannot
+        auto-charge the developer for the next period. Marking past_due
+        rather than silently extending current_period_end for free is the
+        honest outcome: get_subscription() only looks up status=="active",
+        so a past_due subscription naturally stops being returned, and the
+        developer correctly falls back to free-tier limits until they pay
+        again through the normal purchase flow (which replaces this
+        subscription in place — see create_subscription).
 
-        Returns:
-            True if renewal successful
+        Called periodically by app/services/scheduler.py; nothing else
+        calls this — without it, subscriptions never actually expired
+        (cancel_at_period_end had no effect) and no invoice was ever
+        generated for any billing period.
         """
-        subscription = await Subscription.get(subscription_id)
+        from app.services.invoice_service import invoice_service
 
-        if not subscription or subscription.status != "active":
-            return False
-
-        # Check if should cancel at period end
-        if subscription.cancel_at_period_end:
-            subscription.status = "canceled"
-            await subscription.save()
-            print(f"⚠️ Subscription canceled at period end: {subscription.user_id}")
-            return False
-
-        # Calculate new billing period
         now = datetime.now(timezone.utc)
-        if subscription.billing_interval == "yearly":
-            new_period_end = now + timedelta(days=365)
-        else:
-            new_period_end = now + timedelta(days=30)
+        expired = await Subscription.find(
+            Subscription.status == "active",
+            Subscription.current_period_end <= now,
+        ).to_list()
 
-        # Update subscription
-        subscription.current_period_start = now
-        subscription.current_period_end = new_period_end
-        subscription.updated_at = now
+        for subscription in expired:
+            try:
+                await invoice_service.generate_invoice(
+                    user_id=subscription.user_id,
+                    period_start=subscription.current_period_start,
+                    period_end=subscription.current_period_end,
+                    subscription_id=str(subscription.id),
+                )
+            except Exception as e:
+                print(f"⚠️ Failed to generate closing invoice for {subscription.user_id}: {e}")
 
-        await subscription.save()
+            if subscription.cancel_at_period_end:
+                subscription.status = "canceled"
+                print(f"⚠️ Subscription canceled at period end: {subscription.user_id}")
+            else:
+                subscription.status = "past_due"
+                print(f"⚠️ Subscription past_due (period ended, not renewed): {subscription.user_id}")
 
-        print(f"✅ Subscription renewed: {subscription.user_id}")
-        return True
+            subscription.updated_at = now
+            await subscription.save()
 
     async def check_subscription_status(self, user_id: str) -> Dict:
         """
@@ -303,7 +315,16 @@ class SubscriptionService:
         subscription = await self.get_subscription(user_id)
 
         if not subscription:
-            # User is on free tier
+            # No active subscription — either never subscribed, or a
+            # previous subscription lapsed (see process_expired_periods).
+            # Report a lapsed one honestly rather than silently looking
+            # identical to "never subscribed": the developer is correctly
+            # on free-tier limits either way, but they should know why.
+            past_due = await Subscription.find_one(
+                Subscription.user_id == user_id,
+                Subscription.status == "past_due",
+            )
+
             free_plan = get_plan(PlanTier.FREE)
             return {
                 "has_subscription": False,
@@ -312,6 +333,7 @@ class SubscriptionService:
                 "status": "active",
                 "monthly_credits": free_plan.monthly_credits,
                 "max_api_keys": free_plan.max_api_keys,
+                "past_due_plan_tier": past_due.plan_tier if past_due else None,
                 "features": {
                     "ip_whitelisting": free_plan.ip_whitelisting,
                     "webhook_notifications": free_plan.webhook_notifications,
